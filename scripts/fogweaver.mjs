@@ -1,4 +1,5 @@
 import { FogWeaverLayer, drawShapeGeometry, registerFogWeaverCallbacks, hexToRgbArray } from "./layer.mjs";
+import { registerInstallTrackerSetting, maybeSendInstallRecord } from "./installTracker.mjs";
 
 const MODULE_ID = "fog-weaver";
 
@@ -210,6 +211,10 @@ Hooks.once("init", () => {
     _wrapFogCommit();
 
     registerFogWeaverCallbacks(commitShape, _undoLastShape);
+
+    // Hidden world setting that persists the install-tracker state (sent flag,
+    // version, attempt count, last error). Managed entirely by installTracker.mjs.
+    registerInstallTrackerSetting();
 });
 
 // After any vision refresh, reconcile the GM overlay with the current fog texture.
@@ -270,6 +275,14 @@ Hooks.once("ready", async () => {
     }
 
     progress.update({ pct: 1.0, message: `Fog Weaver: Migrated ${toMigrate.length} scene(s)` });
+});
+
+// Post a one-time install record to the tracker endpoint. The call is internally guarded
+// by isActiveGM, so it is safe to register unconditionally. Separated from the migration
+// `ready` hook above to avoid being skipped by that hook's early-return guards (v13, no
+// scenes to migrate, etc.).
+Hooks.once("ready", async () => {
+    await maybeSendInstallRecord();
 });
 
 // On every level/scene enter, reconcile the just-loaded FogExploration's active mode with the
