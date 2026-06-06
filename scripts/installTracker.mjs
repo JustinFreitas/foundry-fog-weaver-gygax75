@@ -13,7 +13,7 @@
 
 const MODULE_ID = "fog-weaver";
 const SETTING_KEY = "installTracker";
-const ENDPOINT = "https://foundry-install.turkeysunite-local.org/module-install";
+const ENDPOINT = "https://foundry.turkeysunite-local.org/module-install";
 // Not a security boundary — anyone reading module source can extract this.
 // It exists only to let the public endpoint reject obvious unauthenticated spam.
 const API_KEY = "1d1075fcabbb5e3e6757f7cc80c229cf4234b1dc226acd91c5d284d3380e0295";
@@ -43,7 +43,7 @@ function _log(...args) {
 
 /**
  * Register the hidden world-scoped setting that persists install-tracker state.
- * Call once from the module's `init` hook alongside other setting registrations.
+ * Call once from the module's `init` hook alongside other settings.registrations.
  */
 export function registerInstallTrackerSetting() {
   game.settings.register(MODULE_ID, SETTING_KEY, {
@@ -61,7 +61,7 @@ export function registerInstallTrackerSetting() {
  */
 export async function maybeSendInstallRecord() {
   if (!game.user.isActiveGM) {
-    _log("install:maybeSend — skipping, not active GM");
+    _log("install:maybeSend", "skipping — not active GM");
     return;
   }
 
@@ -69,7 +69,7 @@ export async function maybeSendInstallRecord() {
   const currentVersion = game.modules.get(MODULE_ID)?.version ?? "unknown";
 
   if (!_shouldSendInstallRecord(state, currentVersion)) {
-    _log("install:maybeSend — skipping, already recorded or retries exhausted", {
+    _log("install:maybeSend", "skipping — already recorded or retries exhausted", {
       sent: state.sent, storedVersion: state.version,
       currentVersion, attempts: state.attempts
     });
@@ -79,9 +79,10 @@ export async function maybeSendInstallRecord() {
   // Version differs from the stored version → reset attempt counter so an
   // upgrade always gets a fresh 3 tries regardless of prior failure history.
   const attemptsForThisVersion = state.version === currentVersion ? state.attempts : 0;
+  const isUpgrade = state.version !== null && state.version !== currentVersion;
 
-  const payload = _buildPayload(currentVersion);
-  _log("install:maybeSend — posting install record", {
+  const payload = _buildPayload(currentVersion, isUpgrade);
+  _log("install:maybeSend", "posting install record", {
     endpoint: ENDPOINT, payload, attempt: attemptsForThisVersion + 1
   });
 
@@ -103,7 +104,7 @@ export async function maybeSendInstallRecord() {
       attempts: attemptsForThisVersion + 1,
       lastError: null
     });
-    _log("install:maybeSend — install record posted successfully");
+    _log("install:maybeSend", "install record posted successfully");
   } catch (err) {
     const newAttempts = attemptsForThisVersion + 1;
     const message = err?.message ?? String(err);
@@ -113,7 +114,7 @@ export async function maybeSendInstallRecord() {
       attempts: newAttempts,
       lastError: message
     });
-    _log("install:maybeSend — install record post failed", {
+    _log("install:maybeSend", "install record post failed", {
       error: message, attempts: newAttempts, max: MAX_ATTEMPTS
     });
     if (newAttempts >= MAX_ATTEMPTS) {
@@ -148,11 +149,13 @@ function _shouldSendInstallRecord(state, currentVersion) {
  * Build the JSON payload sent to the install-tracker endpoint.
  *
  * @param {string} moduleVersion - Current module version string.
+ * @param {boolean} updated - True when the module version changed since the last recorded send.
  * @returns {object}
  */
-function _buildPayload(moduleVersion) {
+function _buildPayload(moduleVersion, updated = false) {
   return {
     moduleId: MODULE_ID,
+    updated,
     system: game.system.id,
     systemVersion: game.system.version,
     foundryVersion: game.version,
