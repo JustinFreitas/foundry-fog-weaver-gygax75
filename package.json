@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Foundry VTT module giving GM manual and hybrid control over fog of war",
   "scripts": {
-    "test": "node --import ./test/setup.mjs --test \"test/*.test.mjs\"",
+    "test": "node --import ./test/setup.mjs --test test/fog-mode.test.mjs test/geometry.test.mjs test/manifest.test.mjs test/undo-stack.test.mjs",
     "check": "node --check scripts/fogweaver.mjs scripts/layer.mjs scripts/installTracker.mjs"
   },
   "author": "Justin Freitas",
