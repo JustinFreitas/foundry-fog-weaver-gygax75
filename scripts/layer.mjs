@@ -81,33 +81,8 @@ export class FogWeaverLayer extends foundry.canvas.layers.InteractionLayer {
         return { isErase, shape, fromCenter, constrain };
     }
 
-    /**
-     * Resolve the (from, to) the user is dragging into a normalized bounding box (top-left,
-     * bottom-right). Encodes Shift (center origin) and Ctrl (constrain to square aspect) so
-     * that the rest of the pipeline can treat ellipse/rect uniformly off two corners.
-     */
     _normalizeBoundingBox(origin, cursor, fromCenter, constrain) {
-        let dx = cursor.x - origin.x;
-        let dy = cursor.y - origin.y;
-        if (constrain) {
-            const side = Math.max(Math.abs(dx), Math.abs(dy));
-            dx = (dx < 0 ? -side : side);
-            dy = (dy < 0 ? -side : side);
-        }
-        if (fromCenter) {
-            const ax = Math.abs(dx);
-            const ay = Math.abs(dy);
-            return {
-                from: { x: origin.x - ax, y: origin.y - ay },
-                to:   { x: origin.x + ax, y: origin.y + ay }
-            };
-        }
-        const ex = origin.x + dx;
-        const ey = origin.y + dy;
-        return {
-            from: { x: Math.min(origin.x, ex), y: Math.min(origin.y, ey) },
-            to:   { x: Math.max(origin.x, ex), y: Math.max(origin.y, ey) }
-        };
+        return normalizeBoundingBox(origin, cursor, fromCenter, constrain);
     }
 
     /* ---- Permissions ---- */
@@ -448,3 +423,33 @@ export function drawShapeGeometry(g, shape, color = 0xFF0000, alpha = 1) {
         }
     }
 }
+
+/**
+ * Resolve the (from, to) the user is dragging into a normalized bounding box (top-left,
+ * bottom-right). Encodes Shift (center origin) and Ctrl (constrain to square aspect) so
+ * that the rest of the pipeline can treat ellipse/rect uniformly off two corners.
+ */
+export function normalizeBoundingBox(origin, cursor, fromCenter, constrain) {
+    let dx = cursor.x - origin.x;
+    let dy = cursor.y - origin.y;
+    if (constrain) {
+        const side = Math.max(Math.abs(dx), Math.abs(dy));
+        dx = (dx < 0 ? -side : side);
+        dy = (dy < 0 ? -side : side);
+    }
+    if (fromCenter) {
+        const ax = Math.abs(dx);
+        const ay = Math.abs(dy);
+        return {
+            from: { x: origin.x - ax, y: origin.y - ay },
+            to:   { x: origin.x + ax, y: origin.y + ay }
+        };
+    }
+    const ex = origin.x + dx;
+    const ey = origin.y + dy;
+    return {
+        from: { x: Math.min(origin.x, ex), y: Math.min(origin.y, ey) },
+        to:   { x: Math.max(origin.x, ex), y: Math.max(origin.y, ey) }
+    };
+}
+

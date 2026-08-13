@@ -1,83 +1,67 @@
-name: Release
+name: Release Creation
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to build and attach zip to (e.g. v0.1.0)'
-        required: true
+  release:
+    types: [published]
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v5
         with:
-          fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          node-version: 20.x
 
-      - name: Resolve tag and version
-        run: |
-          TAG=${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          echo "TAG=$TAG" >> $GITHUB_ENV
-          echo "VERSION=${TAG#v}" >> $GITHUB_ENV
+      - name: Run JS Syntax Check
+        run: npm run check
 
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Run Unit Tests
+        run: npm test
 
-      - name: Find source branch
-        run: |
-          SOURCE_BRANCH=$(git branch -r --contains "$TAG" \
-            | grep -v 'HEAD' \
-            | sed 's|.*origin/||' \
-            | tr -d ' ' \
-            | head -1)
-          echo "SOURCE_BRANCH=${SOURCE_BRANCH:-master}" >> $GITHUB_ENV
-
-      - name: Bump module.json on source branch
-        run: |
-          git checkout "$SOURCE_BRANCH"
-
-          CURRENT=$(jq -r '.version' module.json)
-          if [ "$CURRENT" = "$VERSION" ]; then
-            echo "BUMPED=false" >> $GITHUB_ENV
-            exit 0
-          fi
-
-          jq --arg version "$VERSION" \
-             --arg download "https://github.com/kamcknig/foundry-fog-weaver/releases/download/$TAG/module.zip" \
-             '.version = $version | .download = $download' \
-             module.json > module.tmp.json && mv module.tmp.json module.json
-
-          git add module.json
-          git commit -m "chore: update module.json to $VERSION"
-          git push origin "$SOURCE_BRANCH"
-          echo "BUMPED=true" >> $GITHUB_ENV
-
-      - name: Move tag to bumped commit
-        if: env.BUMPED == 'true'
-        run: |
-          git tag -f "$TAG"
-          git push origin "refs/tags/$TAG" --force
-
-      - name: Build module zip
-        run: zip -r module.zip module.json README.md scripts/ styles/ lang/
-
-      - name: Attach zip to release
+      # Substitute the Manifest and Download URLs in module.json for this release
+      - name: Substitute Manifest and Download Links For Versioned Ones
+        id: sub_manifest_version
         env:
-          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.event.release.tag_name }}
+          URL: https://github.com/${{ github.repository }}
+          MANIFEST: https://github.com/${{ github.repository}}/releases/latest/download/module.json
+          DOWNLOAD: https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/module.zip
         run: |
-          if gh release view "$TAG" &>/dev/null; then
-            gh release upload "$TAG" module.zip --clobber
-          else
-            gh release create "$TAG" module.zip \
-              --title "$TAG" \
-              --generate-notes
-          fi
+          node -e '
+            const fs = require("fs");
+            const f = "module.json";
+            const m = JSON.parse(fs.readFileSync(f, "utf8"));
+            let v = process.env.VERSION;
+            if (v.startsWith("v")) v = v.substring(1);
+            m.version = v;
+            m.url = process.env.URL;
+            m.manifest = process.env.MANIFEST;
+            m.download = process.env.DOWNLOAD;
+            fs.writeFileSync(f, JSON.stringify(m, null, 2) + "\n");
+          '
+
+      # Create a zip file containing all files required by the module
+      - name: Create module.zip bundle
+        run: zip -r ./module.zip module.json README.md scripts/ styles/ lang/
+
+      # Update the published release with module.json and module.zip
+      - name: Update Release with Files
+        id: create_version_release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.event.release.name }}
+          draft: false
+          prerelease: false
+          make_latest: ${{ !github.event.release.prerelease }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: |
+            ./module.json
+            ./module.zip
+          tag_name: ${{ github.event.release.tag_name }}
+          body: ${{ github.event.release.body }}

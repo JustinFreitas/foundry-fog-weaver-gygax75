@@ -3,8 +3,14 @@
         "Title": "Fog Weaver",
         "Settings": {
             "Enabled": {
-                "Name": "Enable Manual Fog Control",
-                "Hint": "When enabled, token movement no longer reveals fog. Use the Fog Weaver tools to reveal and hide areas manually."
+                "Name": "Enable Fog Weaver",
+                "Hint": "Master switch to enable the Fog Weaver GM tools."
+            },
+            "FogMode": {
+                "Name": "Fog Control Mode",
+                "Hint": "Choose whether token vision continues to reveal fog alongside GM edits (Hybrid), or if GM shapes solely dictate fog (Manual).",
+                "Hybrid": "Hybrid (Token Vision + GM Edits)",
+                "Manual": "Manual Only (Token Vision Disabled)"
             },
             "LineWidth": {
                 "Name": "Line Tool Width",

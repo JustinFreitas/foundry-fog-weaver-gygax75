@@ -28,6 +28,99 @@ function _log(...args) {
  */
 const LEGACY_LEVEL_KEY = "_default";
 
+const MAX_HYBRID_UNDO_DEPTH = 5;
+const _hybridUndoStacks = new Map();
+
+/**
+ * Get or initialize the hybrid mode undo stack for the specified level.
+ *
+ * @param {string} [levelKey] - Level id or default.
+ * @returns {PIXI.RenderTexture[]}
+ */
+export function _getHybridUndoStack(levelKey = _getLevelKey()) {
+    if (!_hybridUndoStacks.has(levelKey)) {
+        _hybridUndoStacks.set(levelKey, []);
+    }
+    return _hybridUndoStacks.get(levelKey);
+}
+
+/**
+ * Capture a snapshot of the current live fog texture and push it onto the undo stack.
+ */
+export function _pushHybridUndoSnapshot() {
+    const sprite = canvas.fog?.sprite;
+    if (!sprite?.texture?.valid) return;
+    const tex = _ensureRenderTexture();
+    if (!tex) return;
+
+    const snapshot = typeof canvas.fog._createExplorationRenderTexture === "function"
+        ? canvas.fog._createExplorationRenderTexture()
+        : foundry.canvas.Canvas.getRenderTexture({
+            clearColor: [0, 0, 0, 1],
+            textureConfiguration: canvas.fog.textureConfiguration
+        });
+
+    const dims = canvas.dimensions;
+    const transform = new PIXI.Matrix();
+    transform.tx = -dims.sceneX;
+    transform.ty = -dims.sceneY;
+    canvas.app.renderer.render(sprite, { renderTexture: snapshot, clear: false, transform });
+
+    const stack = _getHybridUndoStack();
+    stack.push(snapshot);
+    while (stack.length > MAX_HYBRID_UNDO_DEPTH) {
+        const oldest = stack.shift();
+        oldest?.destroy(true);
+    }
+}
+
+/**
+ * Clear and destroy textures in hybrid undo stacks.
+ *
+ * @param {string|null} [levelKey] - Specific level key to clear, or null for all levels.
+ */
+export function _clearHybridUndoStacks(levelKey = null) {
+    if (levelKey) {
+        const stack = _hybridUndoStacks.get(levelKey);
+        if (stack) {
+            for (const tex of stack) tex.destroy(true);
+            _hybridUndoStacks.delete(levelKey);
+        }
+    } else {
+        for (const stack of _hybridUndoStacks.values()) {
+            for (const tex of stack) tex.destroy(true);
+        }
+        _hybridUndoStacks.clear();
+    }
+}
+
+/**
+ * Pure function to apply VisibilityFilter fragment shader modifications based on fog mode and enabled state.
+ *
+ * @param {string} src - Source fragment shader GLSL.
+ * @param {object} [options] - Shader options.
+ * @param {string} [mode="hybrid"] - Active fog mode ("hybrid" or "manual").
+ * @param {boolean} [enabled=true] - Whether Fog Weaver is enabled.
+ * @returns {string} The transformed shader string.
+ */
+export function patchVisibilityFilterShader(src, options = {}, mode = "hybrid", enabled = true) {
+    if (!enabled) return src;
+    if (mode === "hybrid") return src;
+    if (options?.persistentVision) return src;
+    return src
+        .replace("mix(unexplored, explored, max(r,v))",
+                 "mix(unexplored, explored, r)")
+        .replace("mix(fow, vec4(0.0), v)",
+                 "mix(fow, vec4(0.0), r)")
+        .replace("uniform vec3 unexploredColor;",
+                 "uniform vec3 unexploredColor;\nuniform float uFogAlpha;")
+        .replace("vec4(unexploredColor, 1.0)", "vec4(unexploredColor, uFogAlpha)")
+        .replace("vec4(unexploredColor, 1.0)", "vec4(unexploredColor, uFogAlpha)")
+        .replace("vec4(fogColor.rgb * backgroundColor, 1.0)",
+                 "vec4(fogColor.rgb * backgroundColor, uFogAlpha)")
+        .replace("vec3(1.0)), 0.5)", "vec3(1.0)), uFogAlpha * 0.5)");
+}
+
 /**
  * Resolve the current level id, or the v13 sentinel.
  * v14: canvas.scene._view is the active level id (string).
@@ -117,6 +210,21 @@ Hooks.once("init", () => {
         default: true,
         requiresReload: false,
         onChange: _onEnabledChange
+    });
+
+    game.settings.register(MODULE_ID, "fogMode", {
+        name: "FOGWEAVER.Settings.FogMode.Name",
+        hint: "FOGWEAVER.Settings.FogMode.Hint",
+        scope: "world",
+        config: true,
+        type: String,
+        choices: {
+            hybrid: "FOGWEAVER.Settings.FogMode.Hybrid",
+            manual: "FOGWEAVER.Settings.FogMode.Manual"
+        },
+        default: "hybrid",
+        requiresReload: false,
+        onChange: () => _onEnabledChange(game.settings.get(MODULE_ID, "enabled"))
     });
 
     game.settings.register(MODULE_ID, "lineWidth", {
@@ -535,12 +643,16 @@ function _wrapFogCommit() {
             const levelCount = canvas.scene?.levels?.size ?? 0;
             if (levelCount <= 1) {
                 return foundry.applications.api.DialogV2.confirm({
+                    classes: ["ose", "dialog"],
+                    position: { width: 400, height: "auto" },
                     window: { title: game.i18n.localize("FOGWEAVER.Controls.ResetFogTitle"), icon: "fa-solid fa-cloud" },
                     content: `<p>${game.i18n.localize("FOGWEAVER.Controls.ResetFogContent")}</p>`,
                     yes: { callback: () => _resetCurrentLevelFog() }
                 });
             }
             return foundry.applications.api.DialogV2.wait({
+                classes: ["ose", "dialog"],
+                position: { width: 400, height: "auto" },
                 window: { title: game.i18n.localize("FOGWEAVER.Controls.ResetFogTitle"), icon: "fa-solid fa-cloud" },
                 content: `<p>${game.i18n.localize("FOGWEAVER.Controls.ResetFogContentMultiLevel")}</p>`,
                 buttons: [
@@ -576,6 +688,7 @@ function _wrapFogCommit() {
         "foundry.canvas.perception.FogManager.prototype._handleReset",
         async function (wrapped, ...args) {
             if (game.user.isGM && game.settings.get(MODULE_ID, "enabled")) {
+                _clearHybridUndoStacks();
                 await canvas.scene.unsetFlag(MODULE_ID, "shapes");
                 await canvas.scene.unsetFlag(MODULE_ID, "weaverFog");
             }
@@ -588,22 +701,15 @@ function _wrapFogCommit() {
         MODULE_ID,
         "foundry.canvas.perception.FogManager.prototype.commit",
         function (wrapped, ...args) {
-            if (game.settings.get(MODULE_ID, "enabled")) return;
+            const mode = game.settings.get(MODULE_ID, "fogMode");
+            if (game.settings.get(MODULE_ID, "enabled") && mode === "manual") return;
             return wrapped(...args);
         },
         "MIXED"
     );
 
     // Replace the visibility shader's compositing logic so fog is driven purely by the GM's
-    // fog texture, not by token vision. Original (visibility.mjs:155-158):
-    //     vec4 fow = mix(unexplored, explored, max(r,v));
-    //     gl_FragColor = mix(fow, vec4(0.0), v);
-    // Patched: fog gradient comes only from r (GM-drawn fog texture); any revealed area (r=1)
-    // is always fully visible regardless of token LOS — matching the "manual fog" model where
-    // the GM decides what is seen, not token position.
-    //
-    // VisibilityFilter's shader factory was renamed between v13 and v14.
-    // Wrapping a non-existent path throws, so we must target the correct name per version.
+    // fog texture in manual mode. In hybrid mode, native shader compositing is preserved.
     const shaderTarget = game.release.generation >= 14
         ? "foundry.canvas.rendering.filters.VisibilityFilter._createFragmentShader"
         : "foundry.canvas.rendering.filters.VisibilityFilter.fragmentShader";
@@ -613,25 +719,9 @@ function _wrapFogCommit() {
         shaderTarget,
         function (wrapped, options) {
             const src = wrapped(options);
-            if (!game.settings.get(MODULE_ID, "enabled")) return src;
-            if (options?.persistentVision) return src; // distinct shader path; no change needed
-            return src
-                .replace("mix(unexplored, explored, max(r,v))",
-                         "mix(unexplored, explored, r)")
-                .replace("mix(fow, vec4(0.0), v)",
-                         "mix(fow, vec4(0.0), r)")
-                // Declare the uFogAlpha uniform after the unexploredColor declaration.
-                .replace("uniform vec3 unexploredColor;",
-                         "uniform vec3 unexploredColor;\nuniform float uFogAlpha;")
-                // Replace both occurrences of vec4(unexploredColor, 1.0) — each call targets
-                // the first remaining match.
-                .replace("vec4(unexploredColor, 1.0)", "vec4(unexploredColor, uFogAlpha)")
-                .replace("vec4(unexploredColor, 1.0)", "vec4(unexploredColor, uFogAlpha)")
-                // Scale the overlay-texture branch.
-                .replace("vec4(fogColor.rgb * backgroundColor, 1.0)",
-                         "vec4(fogColor.rgb * backgroundColor, uFogAlpha)")
-                // Scale explored alpha proportionally so explored areas are always lighter than unexplored.
-                .replace("vec3(1.0)), 0.5)", "vec3(1.0)), uFogAlpha * 0.5)");
+            const enabled = game.settings.get(MODULE_ID, "enabled");
+            const mode = game.settings.get(MODULE_ID, "fogMode");
+            return patchVisibilityFilterShader(src, options, mode, enabled);
         },
         "WRAPPER"
     );
@@ -639,9 +729,6 @@ function _wrapFogCommit() {
     // Force canvas.visibility to remain visible for the GM while the FogWeaver layer is the
     // active scene control. Stock logic (visibility.mjs:497) hides it for GMs without active
     // vision sources; we override that here so the GM sees the actual fog state while painting.
-    // Also re-apply the GM's custom fog tint — effects.mjs resets unexploredColor on every
-    // perception refresh (canvas/groups/effects.mjs: canvas.colors.fogUnexplored.applyRGB(
-    // v.uniforms.unexploredColor)) so we must reassert it here after the stock refresh runs.
     libWrapper.register(
         MODULE_ID,
         "foundry.canvas.groups.CanvasVisibility.prototype.refresh",
@@ -650,21 +737,11 @@ function _wrapFogCommit() {
             if (!game.settings.get(MODULE_ID, "enabled")) return;
             if (!canvas.scene?.tokenVision) return;
 
-            // In v14, the explored container includes a SurfaceExposureContainer that renders
-            // the token's current vision polygon into uSampler. The VisibilityFilter reads `r`
-            // from uSampler, so `r` combines both the fog exploration sprite AND live token
-            // vision via surface exposure. Our shader patch changes max(r,v) to r, but r already
-            // includes that vision — so on scenes with walls or levels (where surface exposure
-            // produces data), the token's LOS remains visible without any FW shapes drawn.
-            // Fix: disable the SurfaceExposureContainer so uSampler.r carries only the fog
-            // exploration sprite (i.e., only what the GM has explicitly revealed).
-            if (this.surfaceExposure) this.surfaceExposure.visible = false;
+            const mode = game.settings.get(MODULE_ID, "fogMode");
+            if (mode === "manual" && this.surfaceExposure) {
+                this.surfaceExposure.visible = false;
+            }
 
-            // In v14, VisibilityFilter.defaultUniforms is a static getter that returns a new
-            // object on each call, so assigning uFogAlpha to it in the init hook has no
-            // persistent effect. The filter instance starts with uFogAlpha undefined (GLSL
-            // defaults to 0), making the fog completely transparent for all clients.
-            // Fix: set uFogAlpha directly on the live filter instance on every refresh.
             const isFogweaverActive = game.user.isGM && ui.controls?.control?.name === "fogweaver";
             if (this.filter) {
                 this.filter.uniforms.uFogAlpha = isFogweaverActive
@@ -675,17 +752,11 @@ function _wrapFogCommit() {
             if (!game.user.isGM) return;
             if (!isFogweaverActive) return;
 
-            // Force visibility on so the GM sees what players see. Stock logic at
-            // visibility.mjs:499 hides this for GMs without vision sources; we override that
-            // exclusively while the FogWeaver tool is the active scene control.
             this.visible = true;
-            // Re-apply the custom tint — effects.mjs resets unexploredColor back to the scene
-            // default on every perception refresh, so we must reassert the GM's chosen color.
             const tint = hexToRgbArray(game.settings.get(MODULE_ID, "gmFogTint"));
             if (this.filter) {
                 this.filter.uniforms.unexploredColor = tint;
             }
-            // Keep the GM overlay's fogColor in sync with the tint setting.
             const overlay = canvas.fogweaver?._gmOverlay;
             if (overlay?.filters?.[0]) {
                 const fc = overlay.filters[0].uniforms.fogColor;
@@ -708,30 +779,21 @@ function _wrapFogCommit() {
  *   `flags.fogweaver.normalSnapshot` (or null/blank) into `explored`. Sets
  *   `activeMode: "normal"`.
  *
- * The atomic FogExploration update writes both the new `explored` value and the
- * snapshot/activeMode flags in one DB roundtrip, with `loadFog: false` to suppress the
- * auto-reload triggered by `_onUpdate`. The caller must run `canvas.visibility.draw()`
- * afterwards to actually load the new texture.
- *
  * @param {boolean} enabled - The new value of the FW enabled setting.
  */
 async function _swapFogState(enabled) {
     if (!game.settings.get(MODULE_ID, "isolateStates")) return;
+    const mode = game.settings.get(MODULE_ID, "fogMode");
+    if (mode === "hybrid") return;
 
-    // Bail out gracefully if the canvas / FogExploration aren't ready. This can happen
-    // if the setting is changed before the world's first scene load. The toggle still
-    // proceeds with the rest of _onEnabledChange — there's just nothing to swap.
     const exploration = canvas.fog?.exploration;
     if (!exploration?.id) return;
 
     const currentExplored = exploration.explored ?? null;
-    // base64 is ~75% efficient; dividing length by ~1365 gives KB.
     const kb = str => Math.round((str?.length ?? 0) * 0.75 / 1024);
     const threshold = game.settings.get(MODULE_ID, "snapshotSizeWarning");
 
     if (enabled) {
-        // Toggle ON: save current normal state to user's snapshot, load FW state from the
-        // current level's slot. Single update with all fields keeps it atomic.
         const weaverFog = _getWeaverFogForCurrentLevel();
         const normalSize = kb(currentExplored);
         _log(`[Fog Weaver] Swap → FW active | level=${_getLevelKey()} | normalSnapshot saved: ${normalSize} KB, weaverFog loaded: ${kb(weaverFog)} KB`);
@@ -745,8 +807,6 @@ async function _swapFogState(enabled) {
         return;
     }
 
-    // Toggle OFF: GM saves current FW state to the current level's scene flag slot (canonical
-    // FW state). Every client then restores their own normal-state snapshot.
     const normalSnapshot = exploration.getFlag(MODULE_ID, "normalSnapshot") ?? null;
     if (game.user.isGM) {
         const weaverSize = kb(currentExplored);
@@ -769,19 +829,20 @@ export async function commitShape(shape) {
     const tex = _ensureRenderTexture();
     if (!tex) return;
 
+    const mode = game.settings.get(MODULE_ID, "fogMode");
+    if (mode === "hybrid") {
+        _pushHybridUndoSnapshot();
+    }
+
     _renderShapeToTexture(tex, shape);
     await _saveAndSync();
 
-    await _persistShape(shape);
+    if (mode === "manual") {
+        await _persistShape(shape);
+    }
     canvas.perception.initialize();
 }
 
-// FogExploration data is persisted as a base64 WebP. When loaded, canvas.fog.sprite.texture
-// is a plain Texture wrapping a BaseTexture — not a BaseRenderTexture — so it has no
-// maskStack and cannot be bound as a render target (PIXI's ScissorSystem crashes).
-// This mirrors FogManager.commit's promotion path: copy the saved-image sprite into a fresh
-// RenderTexture, swap the sprite's texture, and destroy the old one. Subsequent commits then
-// render directly into a real RenderTexture.
 function _ensureRenderTexture() {
     const sprite = canvas.fog.sprite;
     if (!sprite?.texture?.valid) return null;
@@ -792,14 +853,6 @@ function _ensureRenderTexture() {
         clearColor: [0, 0, 0, 1],
         textureConfiguration: canvas.fog.textureConfiguration
     });
-    // Mirror Foundry's FogManager.commit() pattern for the same case (sprite still has a plain
-    // loaded texture, not a RenderTexture): render the live sprite into the new texture using
-    // a transform matrix that negates its (sceneX, sceneY) position, so the content lands at
-    // (0,0) in the destination. Foundry uses this exact pattern in v14 (PIXI v8) — see
-    // FogManager.commit() — so the `transform` render option is reliable when invoked this way.
-    // Using the live sprite (not a freshly-constructed PIXI.Sprite) inherits its already-correct
-    // width/height/scale from FogManager so the copy is pixel-exact regardless of source
-    // texture resolution vs destination texture resolution.
     const dims = canvas.dimensions;
     const transform = new PIXI.Matrix();
     transform.tx = -dims.sceneX;
@@ -807,16 +860,11 @@ function _ensureRenderTexture() {
     canvas.app.renderer.render(sprite, { renderTexture: newTex, clear: false, transform });
     const oldTex = sprite.texture;
     sprite.texture = newTex;
-    // Re-point the GM overlay at the new texture before destroying the old one.
     if (canvas.fogweaver?._gmOverlay) canvas.fogweaver._gmOverlay.texture = newTex;
     oldTex.destroy(true);
     return newTex;
 }
 
-// Render the shape into the fog RenderTexture by attaching the Graphics to the stage,
-// rendering it, then removing/destroying. Adding to the stage briefly guarantees the
-// renderer has a valid scene-graph context for the object; we apply the scene offset on
-// the object since `transform` passed to renderer.render() is unreliable in PIXI v8.
 function _renderShapeToTexture(tex, shape) {
     const dims = canvas.dimensions;
 
@@ -836,36 +884,29 @@ function _renderShapeToTexture(tex, shape) {
     }
 }
 
-// canvas.fog.exploration is normally initialized inside FogManager.commit(), which our intercept
-// bypasses. Initialize it here so that save() doesn't bail out at its null-guard.
 async function _saveAndSync() {
     if (!canvas.fog.exploration) {
-        // v14 requires a `level` field on FogExploration documents; _createExplorationDocument()
-        // handles all required fields including `level`. Fall back to manual construction on v13.
         canvas.fog.exploration = typeof canvas.fog._createExplorationDocument === "function"
             ? canvas.fog._createExplorationDocument()
             : new (getDocumentClass("FogExploration"))({ scene: canvas.scene.id, user: game.user.id });
-        // A freshly-created doc has no activeMode flag, so the canvasReady reconciliation
-        // defaults it to "normal" and immediately overwrites the new texture with weaverFog
-        // (null after a reset), erasing the shape just drawn. Stamp the mode before the doc
-        // is persisted so reconciliation sees it as already correct on the next level visit.
         if (game.settings.get(MODULE_ID, "enabled")) {
-            canvas.fog.exploration.updateSource({ flags: { [MODULE_ID]: { activeMode: "weaver" } } });
+            const mode = game.settings.get(MODULE_ID, "fogMode");
+            canvas.fog.exploration.updateSource({ flags: { [MODULE_ID]: { activeMode: mode === "manual" ? "weaver" : "normal" } } });
         }
     }
     canvas.fog._updated = true;
-    await canvas.fog.save();
-    try {
-        await canvas.fog.sync(game.user);
-    } catch(err) {
-        // sync fails when there are no other connected users; not fatal
-        console.warn(`${MODULE_ID} | fog sync skipped:`, err.message);
+    if (game.release.generation >= 14) {
+        await canvas.fog.save({ share: true });
+    } else {
+        await canvas.fog.save();
+        try {
+            await canvas.fog.sync(game.user);
+        } catch(err) {
+            console.warn(`${MODULE_ID} | fog sync skipped:`, err.message);
+        }
     }
 }
 
-// If two GMs draw shapes simultaneously, this read-modify-write is racy on the scene flag —
-// last write wins. The fog texture itself is fine (it's the canonical state for players);
-// only the undo history (scene.flags.fogweaver.shapes) can drop entries. Acceptable for v1.
 async function _persistShape(shapeData) {
     const shapes = _getShapesForCurrentLevel().slice();
     shapes.push({ id: foundry.utils.randomID(), ...shapeData });
@@ -873,6 +914,27 @@ async function _persistShape(shapeData) {
 }
 
 export async function _undoLastShape() {
+    const mode = game.settings.get(MODULE_ID, "fogMode");
+    if (mode === "hybrid") {
+        const stack = _getHybridUndoStack();
+        if (!stack.length) return;
+        const snapshot = stack.pop();
+        const liveTex = _ensureRenderTexture();
+        if (liveTex) {
+            const dims = canvas.dimensions;
+            const tempSprite = new PIXI.Sprite(snapshot);
+            tempSprite.position.set(dims.sceneX, dims.sceneY);
+            tempSprite.width = dims.sceneWidth;
+            tempSprite.height = dims.sceneHeight;
+            canvas.app.renderer.render(tempSprite, { renderTexture: liveTex, clear: true });
+            tempSprite.destroy();
+        }
+        snapshot.destroy(true);
+        await _saveAndSync();
+        canvas.perception.initialize();
+        return;
+    }
+
     const shapes = _getShapesForCurrentLevel().slice();
     if (!shapes.length) return;
     shapes.pop();
@@ -884,8 +946,6 @@ async function _rebuildFogFromShapes(shapes) {
     const tex = _ensureRenderTexture();
     if (!tex) return;
 
-    // Empty-container render with clear:true zeroes the texture without destroying the sprite.
-    // The Container is briefly attached to the stage to give the renderer a valid scene-graph context.
     const blanker = new PIXI.Container();
     canvas.stage.addChild(blanker);
     try {
@@ -903,13 +963,9 @@ async function _rebuildFogFromShapes(shapes) {
 
 /**
  * Reset the fog for the currently-viewed level only.
- *
- * canvas.fog.reset() emits a server socket that deletes ALL FogExploration documents for the
- * scene (every level). This function targets only the current level by deleting just
- * canvas.fog.exploration. FogExploration._onDelete already checks (user + scene + level) before
- * calling canvas.fog.load(), so other levels' documents and fog states are untouched.
  */
 async function _resetCurrentLevelFog() {
+    _clearHybridUndoStacks(_getLevelKey());
     await _setShapesForCurrentLevel([]);
     await _setWeaverFogForCurrentLevel(null);
 
@@ -920,3 +976,9 @@ async function _resetCurrentLevelFog() {
         canvas.perception.initialize();
     }
 }
+
+// Clean up all GPU undo texture snapshots when canvas tears down
+Hooks.on("canvasTearDown", () => {
+    _clearHybridUndoStacks();
+});
+
