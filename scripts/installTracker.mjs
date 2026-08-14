@@ -56,71 +56,11 @@ export function registerInstallTrackerSetting() {
 
 /**
  * Send the install record if the current world+version hasn't been recorded
- * yet (and we haven't exhausted retry attempts). No-op for non-active-GM
- * sessions. Call once from the module's `ready` hook.
+ * yet. In this gygax75 fork, outbound telemetry is disabled.
  */
 export async function maybeSendInstallRecord() {
-  if (!game.user.isActiveGM) {
-    _log("install:maybeSend", "skipping — not active GM");
-    return;
-  }
-
-  const state = _readState();
-  const currentVersion = game.modules.get(MODULE_ID)?.version ?? "unknown";
-
-  if (!_shouldSendInstallRecord(state, currentVersion)) {
-    _log("install:maybeSend", "skipping — already recorded or retries exhausted", {
-      sent: state.sent, storedVersion: state.version,
-      currentVersion, attempts: state.attempts
-    });
-    return;
-  }
-
-  // Version differs from the stored version → reset attempt counter so an
-  // upgrade always gets a fresh 3 tries regardless of prior failure history.
-  const attemptsForThisVersion = state.version === currentVersion ? state.attempts : 0;
-  const isUpgrade = state.version !== null && state.version !== currentVersion;
-
-  const payload = _buildPayload(currentVersion, isUpgrade);
-  _log("install:maybeSend", "posting install record", {
-    endpoint: ENDPOINT, payload, attempt: attemptsForThisVersion + 1
-  });
-
-  try {
-    const response = await fetch(ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-install-tracker-key": API_KEY
-      },
-      body: JSON.stringify(payload)
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} ${response.statusText}`);
-    }
-    await _writeState({
-      sent: true,
-      version: currentVersion,
-      attempts: attemptsForThisVersion + 1,
-      lastError: null
-    });
-    _log("install:maybeSend", "install record posted successfully");
-  } catch (err) {
-    const newAttempts = attemptsForThisVersion + 1;
-    const message = err?.message ?? String(err);
-    await _writeState({
-      sent: false,
-      version: currentVersion,
-      attempts: newAttempts,
-      lastError: message
-    });
-    _log("install:maybeSend", "install record post failed", {
-      error: message, attempts: newAttempts, max: MAX_ATTEMPTS
-    });
-    if (newAttempts >= MAX_ATTEMPTS) {
-      console.warn(`${MODULE_ID} | Install tracking gave up after ${MAX_ATTEMPTS} failed attempts: ${message}`);
-    }
-  }
+  // Telemetry disabled in gygax75 fork: zero outbound network requests.
+  return;
 }
 
 /**
